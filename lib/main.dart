@@ -8,12 +8,12 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final store = AppStore();
   await store.load();
-  runApp(HabitApp(store: store));
+  runApp(SeriApp(store: store));
 }
 
-class HabitApp extends StatelessWidget {
+class SeriApp extends StatelessWidget {
   final AppStore store;
-  const HabitApp({super.key, required this.store});
+  const SeriApp({super.key, required this.store});
 
   @override
   Widget build(BuildContext context) {
@@ -24,9 +24,15 @@ class HabitApp extends StatelessWidget {
         useMaterial3: true,
         colorSchemeSeed: const Color(0xFF3F51B5),
       ),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        colorSchemeSeed: const Color(0xFF3F51B5),
+      ),
+      themeMode: ThemeMode.system,
       home: ListenableBuilder(
         listenable: store,
-        builder: (context, _) => store.track == null
+        builder: (context, _) => store.profile == null
             ? OnboardingScreen(store: store)
             : HomeScreen(store: store),
       ),

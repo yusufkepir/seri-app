@@ -7,190 +7,141 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'models.dart';
 
 class AppStore extends ChangeNotifier {
-  static const _kTrack = 'track';
-  static const _kHabits = 'habits';
-  static const _kExamDate = 'exam_date';
-  static const _kExamName = 'exam_name';
-  static const _kFreezeCount = 'freeze_count';
-  static const _kDailyReminderHour = 'reminder_hour';
-  static const _kDailyReminderMinute = 'reminder_minute';
-  static const _kIsPremium = 'is_premium';
-
   late SharedPreferences _prefs;
-  Track? track;
-  final List<Habit> _habits = [];
 
-  DateTime? examDate;
-  String examName = 'YKS 2026';
-  int streakFreezesLeft = 2; // Kullanıcıya verilen hak
-  int reminderHour = 20; // Varsayılan saat 20:00
-  int reminderMinute = 0;
-  bool isPremium = false;
+  Profile? profile;
+
+  /// gün -> o gün odaklanılan toplam dakika
+  final Map<String, int> minutes = {};
+
+  /// seri dondurma ile korunmuş günler
+  final Set<String> frozen = {};
+
+  int freezes = 1;
+  int bestStreak = 0;
+  int lastFreezeAward = 0;
 
   Future<void> load() async {
     _prefs = await SharedPreferences.getInstance();
-    final t = _prefs.getString(_kTrack);
-    if (t != null) {
-      track = Track.values.where((e) => e.name == t).firstOrNull;
+    final p = _prefs.getString('profile');
+    if (p != null) {
+      profile = Profile.fromJson(jsonDecode(p) as Map<String, dynamic>);
     }
-    final raw = _prefs.getString(_kHabits);
-    if (raw != null) {
-      final list = jsonDecode(raw) as List;
-      _habits
-        ..clear()
-        ..addAll(list.map((e) => Habit.fromJson(e as Map<String, dynamic>)));
+    final m = _prefs.getString('minutes');
+    if (m != null) {
+      (jsonDecode(m) as Map<String, dynamic>)
+          .forEach((k, v) => minutes[k] = v as int);
     }
-
-    final eDateStr = _prefs.getString(_kExamDate);
-    if (eDateStr != null) {
-      examDate = DateTime.tryParse(eDateStr);
-    } else {
-      // Varsayılan Sınav Tarihi (Örn: 2026 YKS yaklaşık tarihi)
-      examDate = DateTime(2026, 6, 20);
+    frozen.addAll(_prefs.getStringList('frozen') ?? const []);
+    freezes = _prefs.getInt('freezes') ?? 1;
+    bestStreak = _prefs.getInt('best') ?? 0;
+    lastFreezeAward = _prefs.getInt('award') ?? 0;
+    if (profile != null) {
+      _applyFreeze();
+      await _save();
     }
-
-    examName = _prefs.getString(_kExamName) ?? 'YKS 2026';
-    streakFreezesLeft = _prefs.getInt(_kFreezeCount) ?? 2;
-    reminderHour = _prefs.getInt(_kDailyReminderHour) ?? 20;
-    reminderMinute = _prefs.getInt(_kDailyReminderMinute) ?? 0;
-    isPremium = _prefs.getBool(_kIsPremium) ?? false;
   }
 
-  List<Habit> get currentHabits =>
-      _habits.where((h) => h.track == track).toList();
+  Future<void> _save() async {
+    if (profile != null) {
+      await _prefs.setString('profile', jsonEncode(profile!.toJson()));
+    }
+    await _prefs.setString('minutes', jsonEncode(minutes));
+    await _prefs.setStringList('frozen', frozen.toList());
+    await _prefs.setInt('freezes', freezes);
+    await _prefs.setInt('best', bestStreak);
+    await _prefs.setInt('award', lastFreezeAward);
+  }
 
-  /// Seçili alandaki günlük alışkanlıklardan en az biri yapılan veya dondurulan ardışık gün sayısı
-  int get trackStreak {
-    final daily =
-        currentHabits.where((h) => h.kind == HabitKind.daily).toList();
-    if (daily.isEmpty) return 0;
+  int minutesOn(DateTime d) => minutes[dayKey(d)] ?? 0;
 
-    bool anySaved(DateTime d) => daily.any((h) => h.isCompletedOrSavedOn(d));
-    var day = DateTime.now();
-    if (!anySaved(day)) day = previousDay(day);
+  int get todayMinutes => minutesOn(DateTime.now());
+
+  bool covered(DateTime d) =>
+      minutesOn(d) >= minStreakMinutes || frozen.contains(dayKey(d));
+
+  /// Dün kaçırıldıysa ve ondan önceki gün seri sürüyorsa, bir dondurma harcanır.
+  void _applyFreeze() {
+    final today = dayOnly(DateTime.now());
+    final y = previousDay(today);
+    final y2 = previousDay(y);
+    if (!covered(y) && covered(y2) && freezes > 0) {
+      frozen.add(dayKey(y));
+      freezes--;
+    }
+  }
+
+  int get streak {
+    var day = dayOnly(DateTime.now());
+    if (!covered(day)) day = previousDay(day);
     var n = 0;
-    while (anySaved(day)) {
+    while (covered(day)) {
       n++;
       day = previousDay(day);
     }
     return n;
   }
 
-  int bestQuit(Habit h) => max(h.bestQuitDays, h.daysClean);
+  int get totalMinutes => minutes.values.fold(0, (a, b) => a + b);
 
-  /// Sınava kalan gün sayısı
-  int? get daysUntilExam {
-    if (examDate == null) return null;
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final target = DateTime(examDate!.year, examDate!.month, examDate!.day);
-    return target.difference(today).inDays;
+  int get goalDays {
+    final goal = profile?.dailyGoal;
+    if (goal == null) return 0;
+    return minutes.values.where((m) => m >= goal).length;
   }
 
-  Future<void> _save() async {
-    await _prefs.setString(
-        _kHabits, jsonEncode(_habits.map((h) => h.toJson()).toList()));
-    if (track != null) await _prefs.setString(_kTrack, track!.name);
-    if (examDate != null) await _prefs.setString(_kExamDate, examDate!.toIso8601String());
-    await _prefs.setString(_kExamName, examName);
-    await _prefs.setInt(_kFreezeCount, streakFreezesLeft);
-    await _prefs.setInt(_kDailyReminderHour, reminderHour);
-    await _prefs.setInt(_kDailyReminderMinute, reminderMinute);
-    await _prefs.setBool(_kIsPremium, isPremium);
+  int get daysToExam =>
+      daysBetween(DateTime.now(), profile!.examDate);
+
+  Set<String> unlocked() {
+    final best = max(bestStreak, streak);
+    final total = totalMinutes;
+    return {
+      if (total > 0) 'first',
+      if (best >= 3) 's3',
+      if (best >= 7) 's7',
+      if (best >= 14) 's14',
+      if (best >= 30) 's30',
+      if (total >= 600) 'h10',
+      if (total >= 3000) 'h50',
+      if (total >= 6000) 'h100',
+      if (goalDays >= 5) 'g5',
+    };
   }
 
-  Future<void> selectTrack(Track t) async {
-    track = t;
+  Future<void> setProfile(Profile p) async {
+    profile = p;
     await _save();
     notifyListeners();
   }
 
-  Future<void> addHabit(String name, String emoji, HabitKind kind) async {
-    final now = DateTime.now();
-    _habits.add(Habit(
-      id: now.microsecondsSinceEpoch.toString(),
-      name: name,
-      emoji: emoji,
-      track: track!,
-      kind: kind,
-      createdAt: now,
-      quitStart: kind == HabitKind.quit ? now : null,
-    ));
-    await _save();
-    notifyListeners();
-  }
-
-  Future<void> toggleToday(Habit h) async {
+  /// Seansı kaydeder, yeni açılan rozetleri döndürür.
+  Future<List<Achievement>> completeSession(int mins) async {
+    final before = unlocked();
     final key = dayKey(DateTime.now());
-    if (!h.done.remove(key)) h.done.add(key);
-    await _save();
-    notifyListeners();
-  }
-
-  /// Belirli bir günün durumunu değiştir (Takvim ekranı için)
-  Future<void> toggleDay(Habit h, DateTime date) async {
-    final key = dayKey(date);
-    if (h.done.contains(key)) {
-      h.done.remove(key);
-    } else {
-      h.done.add(key);
+    minutes[key] = (minutes[key] ?? 0) + mins;
+    final s = streak;
+    if (s > bestStreak) bestStreak = s;
+    if (s > 0 && s % 7 == 0 && lastFreezeAward != s) {
+      freezes = min(2, freezes + 1);
+      lastFreezeAward = s;
     }
+    final after = unlocked();
     await _save();
     notifyListeners();
+    return allAchievements
+        .where((a) => after.contains(a.id) && !before.contains(a.id))
+        .toList();
   }
 
-  /// Seri Dondurma Haklarını Kullanma (Streak Freeze)
-  Future<bool> freezeStreakForToday(Habit h) async {
-    if (streakFreezesLeft <= 0) return false;
-    final key = dayKey(DateTime.now());
-    h.frozenDates.add(key);
-    streakFreezesLeft--;
-    await _save();
-    notifyListeners();
-    return true;
-  }
-
-  /// Kaçırılan günü geri kazanma görevi (Streak Recovery Task)
-  Future<void> recoverMissedDay(Habit h, DateTime date) async {
-    final key = dayKey(date);
-    h.recoveredDates.add(key);
-    await _save();
-    notifyListeners();
-  }
-
-  /// Sınav Bilgisi Güncelleme
-  Future<void> setExamDetails(String name, DateTime date) async {
-    examName = name;
-    examDate = date;
-    await _save();
-    notifyListeners();
-  }
-
-  /// Hatırlatma Saatini Güncelleme
-  Future<void> setReminderTime(int hour, int minute) async {
-    reminderHour = hour;
-    reminderMinute = minute;
-    await _save();
-    notifyListeners();
-  }
-
-  /// Premium durumunu aktifleştirme (Abonelik / Ödüllü Reklam sonrası)
-  Future<void> setPremium(bool active) async {
-    isPremium = active;
-    await _save();
-    notifyListeners();
-  }
-
-  Future<void> relapse(Habit h) async {
-    h.bestQuitDays = max(h.bestQuitDays, h.daysClean);
-    h.quitStart = DateTime.now();
-    await _save();
-    notifyListeners();
-  }
-
-  Future<void> remove(Habit h) async {
-    _habits.removeWhere((x) => x.id == h.id);
-    await _save();
+  Future<void> reset() async {
+    await _prefs.clear();
+    profile = null;
+    minutes.clear();
+    frozen.clear();
+    freezes = 1;
+    bestStreak = 0;
+    lastFreezeAward = 0;
     notifyListeners();
   }
 }
